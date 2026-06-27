@@ -11,6 +11,7 @@ requires-python = ">=3.11,<3.15"
 dependencies = [
     "pydantic >=2.11.0,<2.13.0",
     "docstring-parser >=0.15,<=0.17",
+    "s3fs", . # for s3 error retries
 ]
 [project.optional-dependencies]
 dev = [
