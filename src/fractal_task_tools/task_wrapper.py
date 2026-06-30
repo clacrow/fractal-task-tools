@@ -6,6 +6,8 @@ from argparse import ArgumentParser
 from json import JSONEncoder
 from pathlib import Path
 
+import s3fs
+
 from .logging_config import WRAPPER_LOGGER_NAME
 from .logging_config import setup_logging_config
 
@@ -96,6 +98,34 @@ def run_fractal_task(
 
     # Run task
     task_wrapper_logger.info(f"START {task_function.__name__} task")
+
+    #####
+    # Here we add additional errors to retry on
+    #####
+    task_wrapper_logger.info("Adding custom s3fs retry handler for clock-skew errors.")
+    # TODO(PR): consider changing to retry on a specific exceptions rather than rely on
+    # pattern matching on the exception string.
+
+    def skew_retry_handler(e: Exception) -> bool:
+        """Custom s3fs retry predicate: retry the clock-skew ClientError.
+
+        Receives the raw botocore exception (before s3fs translates it to
+        PermissionError). Returning True makes s3fs sleep-and-retry, which re-signs
+        the request with a fresh timestamp.
+        """
+        # Substrings identifying the skew error on the botocore ClientError.
+        SKEW_MARKERS = (
+            "RequestTimeTooSkewed",
+            "request time and the current time",
+            "PermissionError:",
+        )
+        return any(m in str(e) for m in SKEW_MARKERS)
+
+    s3fs.set_custom_error_handler(skew_retry_handler)
+    #####
+    # End of adding additional errors to retry on
+    #####
+
     metadata_update = task_function(**pars)
     task_wrapper_logger.info(f"END {task_function.__name__} task")
 
