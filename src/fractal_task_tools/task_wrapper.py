@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 from json import JSONEncoder
 from pathlib import Path
 
+import botocore
 import s3fs
 
 from .logging_config import WRAPPER_LOGGER_NAME
@@ -99,32 +100,37 @@ def run_fractal_task(
     # Run task
     task_wrapper_logger.info(f"START {task_function.__name__} task")
 
-    #####
-    # Here we add additional errors to retry on
-    #####
-    task_wrapper_logger.info("Adding custom s3fs retry handler for clock-skew errors.")
-    # TODO(PR): consider changing to retry on a specific exceptions rather than rely on
-    # pattern matching on the exception string.
+    # Adding additional retry handler for s3fs
+    # Most errors from botocore are "ClientError" class which is quite generic.
+    # For now we rely on the pattern matching, as s3fs also does it this way internally
+    # for other errors.
+    ERROR_PATTERNS_TO_RETRY_ON = (
+        "RequestTimeTooSkewed",
+        "request time and the current time",
+    )
+    task_wrapper_logger.info("Adding custom s3fs retry handler for botocore errors.")
+    task_wrapper_logger.debug(
+        "Custom s3fs retry handler will retry on the following error patterns: "
+        f"{ERROR_PATTERNS_TO_RETRY_ON}"
+    )
 
-    def skew_retry_handler(e: Exception) -> bool:
+    def skew_retry_handler(err: botocore.exceptions.BotoCoreError) -> bool:
         """Custom s3fs retry predicate: retry the clock-skew ClientError.
 
-        Receives the raw botocore exception (before s3fs translates it to
-        PermissionError). Returning True makes s3fs sleep-and-retry, which re-signs
-        the request with a fresh timestamp.
+        Receives the raw botocore exception. Returning True makes s3fs sleep-and-retry,
+        which re-signs the request with a fresh timestamp.
         """
-        # Substrings identifying the skew error on the botocore ClientError.
-        SKEW_MARKERS = (
-            "RequestTimeTooSkewed",
-            "request time and the current time",
-            "PermissionError:",
-        )
-        return any(m in str(e) for m in SKEW_MARKERS)
+        for pattern in ERROR_PATTERNS_TO_RETRY_ON:
+            if pattern in str(err):
+                task_wrapper_logger.debug(
+                    "Custom s3fs retry handler: matched error "
+                    f"'{str(err)}' with {pattern=}"
+                )
+                return True
+        return False
 
+    # this needs to be added once and it's added globally
     s3fs.set_custom_error_handler(skew_retry_handler)
-    #####
-    # End of adding additional errors to retry on
-    #####
 
     metadata_update = task_function(**pars)
     task_wrapper_logger.info(f"END {task_function.__name__} task")
